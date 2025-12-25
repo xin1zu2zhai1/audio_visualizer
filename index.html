@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audio Spectrum Visualizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #111827;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useCallback } = React;
+
+    const AudioSpectrum = () => {
+      const [fileName, setFileName] = useState('');
+      const [isPlaying, setIsPlaying] = useState(false);
+      const [isLoaded, setIsLoaded] = useState(false);
+      const [isLoading, setIsLoading] = useState(false);
+      const [currentTime, setCurrentTime] = useState(0);
+      const [duration, setDuration] = useState(0);
+      const [visualStyle, setVisualStyle] = useState('bars');
+      const [colorScheme, setColorScheme] = useState('gradient');
+      const [sensitivity, setSensitivity] = useState(1.5);
+      const [error, setError] = useState('');
+      const [bgPreviewUrl, setBgPreviewUrl] = useState(null);
+      const [bgOpacity, setBgOpacity] = useState(0.5);
+      const [bgBlur, setBgBlur] = useState(0);
+      const [bgVersion, setBgVersion] = useState(0);
+      const [isRecording, setIsRecording] = useState(false);
+      const [recordingStatus, setRecordingStatus] = useState('');
+      
+      const canvasRef = useRef(null);
+      const bgImageRef = useRef(null);
+      const audioContextRef = useRef(null);
+      const analyserRef = useRef(null);
+      const sourceRef = useRef(null);
+      const audioBufferRef = useRef(null);
+      const startTimeRef = useRef(0);
+      const pauseTimeRef = useRef(0);
+      const animationRef = useRef(null);
+      const dataArrayRef = useRef(null);
+      const gainNodeRef = useRef(null);
+      const mediaRecorderRef = useRef(null);
+      const recordedChunksRef = useRef([]);
+
+      const getColorScheme = useCallback((scheme) => {
+        const schemes = {
+          gradient: (i, total, value) => {
+            const hue = (i / total) * 360;
+            const lightness = 40 + (value / 255) * 30;
+            return `hsl(${hue}, 80%, ${lightness}%)`;
+          },
+          fire: (i, total, value) => {
+            const intensity = value / 255;
+            const r = Math.min(255, Math.floor(intensity * 400));
+            const g = Math.min(255, Math.floor(intensity * 200));
+            const b = Math.floor(intensity * 50);
+            return `rgb(${r}, ${g}, ${b})`;
+          },
+          ocean: (i, total, value) => {
+            const intensity = value / 255;
+            const r = Math.floor(intensity * 50);
+            const g = Math.floor(100 + intensity * 100);
+            const b = Math.floor(150 + intensity * 105);
+            return `rgb(${r}, ${g}, ${b})`;
+          },
+          neon: (i, total, value) => {
+            const hue = 280 + (i / total) * 80;
+            const lightness = 30 + (value / 255) * 50;
+            return `hsl(${hue}, 100%, ${lightness}%)`;
+          },
+          mono: (i, total, value) => {
+            const brightness = 40 + (value / 255) * 60;
+            return `hsl(0, 0%, ${brightness}%)`;
+          }
+        };
+        return schemes[scheme] || schemes.gradient;
+      }, []);
+
+      const getAudioContext = useCallback(() => {
+        if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+          
+          const analyser = audioContextRef.current.createAnalyser();
+          analyser.fftSize = 2048;
+          analyser.smoothingTimeConstant = 0.8;
+          analyserRef.current = analyser;
+          
+          const gainNode = audioContextRef.current.createGain();
+          gainNode.connect(analyser);
+          analyser.connect(audioContextRef.current.destination);
+          gainNodeRef.current = gainNode;
+          
+          dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+        }
+        return audioContextRef.current;
+      }, []);
+
+      const loadAudioFile = useCallback(async (file) => {
+        setIsLoading(true);
+        setError('');
+        setIsLoaded(false);
+        
+        try {
+          const audioContext = getAudioContext();
+          
+          if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+          }
+          
+          const arrayBuffer = await file.arrayBuffer();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          audioBufferRef.current = audioBuffer;
+          setDuration(audioBuffer.duration);
+          setIsLoaded(true);
+          setIsLoading(false);
+          pauseTimeRef.current = 0;
+          setCurrentTime(0);
+        } catch (e) {
+          console.error('Audio load error:', e);
+          setError('ファイルの読み込みに失敗しました: ' + e.message);
+          setIsLoading(false);
+        }
+      }, [getAudioContext]);
+
+      const startPlayback = useCallback((offset = 0) => {
+        const audioContext = audioContextRef.current;
+        const audioBuffer = audioBufferRef.current;
+        
+        if (!audioContext || !audioBuffer) return;
+        
+        if (sourceRef.current) {
+          try {
+            sourceRef.current.stop();
+          } catch (e) {}
+        }
+        
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(gainNodeRef.current);
+        
+        source.onended = () => {
+          if (isPlaying && pauseTimeRef.current === 0) {
+            setIsPlaying(false);
+            setCurrentTime(0);
+            pauseTimeRef.current = 0;
+          }
+        };
+        
+        sourceRef.current = source;
+        startTimeRef.current = audioContext.currentTime - offset;
+        source.start(0, offset);
+      }, [isPlaying]);
+
+      const handlePlayPause = useCallback(async () => {
+        const audioContext = getAudioContext();
+        
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        
+        if (!audioBufferRef.current) return;
+        
+        if (isPlaying) {
+          pauseTimeRef.current = audioContextRef.current.currentTime - startTimeRef.current;
+          if (sourceRef.current) {
+            try {
+              sourceRef.current.stop();
+            } catch (e) {}
+          }
+          setIsPlaying(false);
+        } else {
+          startPlayback(pauseTimeRef.current);
+          setIsPlaying(true);
+        }
+      }, [isPlaying, getAudioContext, startPlayback]);
+
+      useEffect(() => {
+        let interval;
+        if (isPlaying && audioContextRef.current) {
+          interval = setInterval(() => {
+            const elapsed = audioContextRef.current.currentTime - startTimeRef.current;
+            if (elapsed >= duration) {
+              setCurrentTime(0);
+              pauseTimeRef.current = 0;
+              setIsPlaying(false);
+            } else {
+              setCurrentTime(elapsed);
+            }
+          }, 100);
+        }
+        return () => clearInterval(interval);
+      }, [isPlaying, duration]);
+
+      // Animation loop
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+        let frameId;
+        
+        const currentBgImage = bgImageRef.current;
+        const currentOpacity = bgOpacity;
+        const currentBlur = bgBlur;
+        const currentStyle = visualStyle;
+        const currentScheme = colorScheme;
+        const currentSensitivity = sensitivity;
+        const getColor = getColorScheme(currentScheme);
+
+        const render = () => {
+          ctx.fillStyle = '#0a0a14';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          if (currentBgImage && currentBgImage.complete && currentBgImage.naturalWidth > 0) {
+            ctx.save();
+            
+            if (currentBlur > 0) {
+              ctx.filter = `blur(${currentBlur}px)`;
+            }
+            
+            const img = currentBgImage;
+            const imgRatio = img.naturalWidth / img.naturalHeight;
+            const canvasRatio = canvas.width / canvas.height;
+            
+            let drawWidth, drawHeight, drawX, drawY;
+            
+            if (imgRatio > canvasRatio) {
+              drawHeight = canvas.height;
+              drawWidth = img.naturalWidth * (canvas.height / img.naturalHeight);
+              drawX = (canvas.width - drawWidth) / 2;
+              drawY = 0;
+            } else {
+              drawWidth = canvas.width;
+              drawHeight = img.naturalHeight * (canvas.width / img.naturalWidth);
+              drawX = 0;
+              drawY = (canvas.height - drawHeight) / 2;
+            }
+            
+            ctx.globalAlpha = currentOpacity;
+            ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
+            ctx.globalAlpha = 1;
+            ctx.filter = 'none';
+            ctx.restore();
+          }
+
+          const analyser = analyserRef.current;
+          const dataArray = dataArrayRef.current;
+          
+          if (analyser && dataArray) {
+            analyser.getByteFrequencyData(dataArray);
+            const bufferLength = analyser.frequencyBinCount;
+
+            if (currentStyle === 'bars') {
+              const barCount = 128;
+              const barWidth = canvas.width / barCount;
+              for (let i = 0; i < barCount; i++) {
+                const dataIndex = Math.floor(i * bufferLength / barCount);
+                const value = dataArray[dataIndex] * currentSensitivity;
+                const barHeight = (value / 255) * canvas.height * 0.85;
+                const x = i * barWidth;
+                const y = canvas.height - barHeight;
+                ctx.fillStyle = getColor(i, barCount, Math.min(255, value));
+                ctx.fillRect(x, y, barWidth - 1, barHeight);
+              }
+            } else if (currentStyle === 'wave') {
+              ctx.lineWidth = 3;
+              ctx.beginPath();
+              const sliceWidth = canvas.width / bufferLength;
+              let x = 0;
+              for (let i = 0; i < bufferLength; i++) {
+                const value = dataArray[i] * currentSensitivity;
+                const y = canvas.height - (value / 255) * canvas.height * 0.9;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+                x += sliceWidth;
+              }
+              const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
+              for (let i = 0; i <= 10; i++) {
+                gradient.addColorStop(i / 10, getColor(i, 10, 200));
+              }
+              ctx.strokeStyle = gradient;
+              ctx.stroke();
+            } else if (currentStyle === 'circle') {
+              const centerX = canvas.width / 2;
+              const centerY = canvas.height / 2;
+              const radius = Math.min(centerX, centerY) * 0.3;
+              const barCount = 180;
+              for (let i = 0; i < barCount; i++) {
+                const dataIndex = Math.floor(i * bufferLength / barCount);
+                const value = dataArray[dataIndex] * currentSensitivity;
+                const barHeight = (value / 255) * radius * 1.5;
+                const angle = (i / barCount) * Math.PI * 2 - Math.PI / 2;
+                const x1 = centerX + Math.cos(angle) * radius;
+                const y1 = centerY + Math.sin(angle) * radius;
+                const x2 = centerX + Math.cos(angle) * (radius + barHeight);
+                const y2 = centerY + Math.sin(angle) * (radius + barHeight);
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.strokeStyle = getColor(i, barCount, Math.min(255, value));
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+              }
+              ctx.beginPath();
+              ctx.arc(centerX, centerY, radius * 0.8, 0, Math.PI * 2);
+              ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+              ctx.lineWidth = 2;
+              ctx.stroke();
+            } else if (currentStyle === 'particles') {
+              const particleCount = 64;
+              const centerX = canvas.width / 2;
+              const centerY = canvas.height / 2;
+              for (let i = 0; i < particleCount; i++) {
+                const dataIndex = Math.floor(i * bufferLength / particleCount);
+                const value = dataArray[dataIndex] * currentSensitivity;
+                const size = (value / 255) * 20 + 2;
+                const angle = (i / particleCount) * Math.PI * 2;
+                const distance = 80 + (value / 255) * 150;
+                const x = centerX + Math.cos(angle) * distance;
+                const y = centerY + Math.sin(angle) * distance;
+                ctx.beginPath();
+                ctx.arc(x, y, size, 0, Math.PI * 2);
+                ctx.fillStyle = getColor(i, particleCount, Math.min(255, value));
+                ctx.fill();
+              }
+            }
+          }
+
+          frameId = requestAnimationFrame(render);
+        };
+
+        render();
+
+        return () => {
+          cancelAnimationFrame(frameId);
+        };
+      }, [visualStyle, colorScheme, sensitivity, bgOpacity, bgBlur, bgVersion, getColorScheme]);
+
+      const handleFileChange = async (e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+          setFileName(file.name);
+          setIsPlaying(false);
+          if (sourceRef.current) {
+            try { sourceRef.current.stop(); } catch (e) {}
+          }
+          await loadAudioFile(file);
+        }
+      };
+
+      const handleDrop = async (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files?.[0];
+        if (file && file.type.startsWith('audio/')) {
+          setFileName(file.name);
+          setIsPlaying(false);
+          if (sourceRef.current) {
+            try { sourceRef.current.stop(); } catch (e) {}
+          }
+          await loadAudioFile(file);
+        }
+      };
+
+      const formatTime = (time) => {
+        const min = Math.floor(time / 60);
+        const sec = Math.floor(time % 60);
+        return `${min}:${sec.toString().padStart(2, '0')}`;
+      };
+
+      const handleBackgroundChange = (e) => {
+        const file = e.target.files?.[0];
+        if (file && file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const dataUrl = event.target.result;
+            const img = new Image();
+            img.onload = () => {
+              bgImageRef.current = img;
+              setBgPreviewUrl(dataUrl);
+              setBgVersion(v => v + 1);
+            };
+            img.src = dataUrl;
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const clearBackground = () => {
+        bgImageRef.current = null;
+        setBgPreviewUrl(null);
+        setBgVersion(v => v + 1);
+      };
+
+      const startRecording = useCallback(async () => {
+        const canvas = canvasRef.current;
+        if (!canvas || !audioBufferRef.current) return;
+
+        try {
+          setIsRecording(true);
+          setRecordingStatus('録画準備中...');
+          recordedChunksRef.current = [];
+
+          const canvasStream = canvas.captureStream(60);
+          
+          const audioContext = audioContextRef.current;
+          const destination = audioContext.createMediaStreamDestination();
+          
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBufferRef.current;
+          source.connect(gainNodeRef.current);
+          source.connect(destination);
+          
+          const combinedStream = new MediaStream([
+            ...canvasStream.getVideoTracks(),
+            ...destination.stream.getAudioTracks()
+          ]);
+
+          const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') 
+            ? 'video/webm;codecs=vp9,opus'
+            : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+              ? 'video/webm;codecs=vp8,opus'
+              : 'video/webm';
+
+          const mediaRecorder = new MediaRecorder(combinedStream, {
+            mimeType,
+            videoBitsPerSecond: 8000000
+          });
+
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              recordedChunksRef.current.push(event.data);
+            }
+          };
+
+          mediaRecorder.onstop = () => {
+            setRecordingStatus('動画を生成中...');
+            
+            const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `spectrum_${new Date().toISOString().slice(0,19).replace(/[:-]/g, '')}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            
+            URL.revokeObjectURL(url);
+            setIsRecording(false);
+            setRecordingStatus('');
+          };
+
+          mediaRecorderRef.current = mediaRecorder;
+          
+          if (sourceRef.current) {
+            try { sourceRef.current.stop(); } catch (e) {}
+          }
+          
+          sourceRef.current = source;
+          startTimeRef.current = audioContext.currentTime;
+          pauseTimeRef.current = 0;
+          setCurrentTime(0);
+
+          source.onended = () => {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+              mediaRecorderRef.current.stop();
+            }
+            setIsPlaying(false);
+            setCurrentTime(0);
+            pauseTimeRef.current = 0;
+          };
+
+          mediaRecorder.start(100);
+          source.start(0);
+          setIsPlaying(true);
+          setRecordingStatus('録画中...');
+
+        } catch (e) {
+          console.error('Recording error:', e);
+          setIsRecording(false);
+          setRecordingStatus('録画エラー: ' + e.message);
+        }
+      }, []);
+
+      const stopRecording = useCallback(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop();
+        }
+        if (sourceRef.current) {
+          try { sourceRef.current.stop(); } catch (e) {}
+        }
+        setIsPlaying(false);
+      }, []);
+
+      return (
+        <div className="min-h-screen bg-gray-900 text-white p-4">
+          <div className="max-w-4xl mx-auto">
+            <h1 className="text-2xl md:text-3xl font-bold text-center mb-6 bg-gradient-to-r from-purple-400 via-pink-500 to-red-500 bg-clip-text text-transparent">
+              🎵 Audio Spectrum Visualizer
+            </h1>
+
+            {/* File Upload Row */}
+            <div className="flex gap-4 mb-4">
+              {/* Audio File Upload */}
+              <div
+                onDrop={handleDrop}
+                onDragOver={(e) => e.preventDefault()}
+                className="flex-1 border-2 border-dashed border-gray-600 rounded-xl p-4 text-center hover:border-purple-500 transition-colors cursor-pointer"
+              >
+                <input
+                  type="file"
+                  accept="audio/*"
+                  onChange={handleFileChange}
+                  className="hidden"
+                  id="audio-input"
+                />
+                <label htmlFor="audio-input" className="cursor-pointer block">
+                  <p className="text-gray-400">🎵 音声ファイル</p>
+                  <p className="text-xs text-gray-500 mt-1">MP3, WAV, OGG, M4A</p>
+                </label>
+                {fileName && (
+                  <p className="mt-2 text-purple-400 font-medium text-sm truncate">🎵 {fileName}</p>
+                )}
+                {isLoading && (
+                  <p className="mt-2 text-yellow-400 text-sm">⏳ 読み込み中...</p>
+                )}
+                {error && (
+                  <p className="mt-2 text-red-400 text-xs">{error}</p>
+                )}
+              </div>
+
+              {/* Background Image Upload */}
+              <div className="flex-1 border-2 border-dashed border-gray-600 rounded-xl p-4 text-center hover:border-purple-500 transition-colors cursor-pointer">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleBackgroundChange}
+                  className="hidden"
+                  id="bg-input"
+                />
+                <label htmlFor="bg-input" className="cursor-pointer block">
+                  <p className="text-gray-400">🖼️ 背景画像</p>
+                  <p className="text-xs text-gray-500 mt-1">JPG, PNG, GIF, WebP</p>
+                </label>
+                {bgPreviewUrl && (
+                  <div className="mt-2 flex items-center justify-center gap-2">
+                    <img 
+                      src={bgPreviewUrl} 
+                      alt="背景" 
+                      className="w-12 h-8 object-cover rounded border border-gray-600"
+                    />
+                    <span className="text-xs text-green-400">✓</span>
+                    <button
+                      onClick={(e) => { e.preventDefault(); clearBackground(); }}
+                      className="text-xs text-red-400 hover:text-red-300"
+                    >
+                      削除
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Canvas - 16:9 aspect ratio */}
+            <div className="rounded-xl overflow-hidden mb-4 bg-gray-950 border border-gray-800">
+              <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+                <canvas
+                  ref={canvasRef}
+                  width={1920}
+                  height={1080}
+                  className="absolute inset-0 w-full h-full"
+                />
+              </div>
+            </div>
+
+            {/* Playback Controls */}
+            <div className="bg-gray-800 rounded-xl p-4 mb-4">
+              <div className="flex items-center justify-center gap-4 mb-3">
+                <button
+                  onClick={handlePlayPause}
+                  disabled={!isLoaded || isRecording}
+                  className={`px-8 py-3 rounded-full font-semibold transition-all flex items-center gap-2 ${
+                    isLoaded && !isRecording
+                      ? 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600'
+                      : 'bg-gray-600 cursor-not-allowed opacity-50'
+                  }`}
+                >
+                  {isPlaying ? '⏸ 停止' : '▶ 再生'}
+                </button>
+                
+                {!isRecording ? (
+                  <button
+                    onClick={startRecording}
+                    disabled={!isLoaded}
+                    className={`px-8 py-3 rounded-full font-semibold transition-all flex items-center gap-2 ${
+                      isLoaded
+                        ? 'bg-gradient-to-r from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600'
+                        : 'bg-gray-600 cursor-not-allowed opacity-50'
+                    }`}
+                  >
+                    🔴 録画
+                  </button>
+                ) : (
+                  <button
+                    onClick={stopRecording}
+                    className="px-8 py-3 rounded-full font-semibold transition-all flex items-center gap-2 bg-gray-600 hover:bg-gray-500"
+                  >
+                    ⏹ 録画停止
+                  </button>
+                )}
+              </div>
+              
+              {recordingStatus && (
+                <div className="text-center text-yellow-400 text-sm mb-2">
+                  {recordingStatus}
+                </div>
+              )}
+              
+              {isLoaded && (
+                <div className="text-center text-gray-400 text-sm">
+                  {formatTime(currentTime)} / {formatTime(duration)}
+                </div>
+              )}
+            </div>
+
+            {/* Visual Style */}
+            <div className="bg-gray-800 rounded-xl p-4 mb-4">
+              <p className="text-xs text-gray-400 mb-2">スタイル</p>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { id: 'bars', label: '📊 バー' },
+                  { id: 'wave', label: '〰️ ウェーブ' },
+                  { id: 'circle', label: '⭕ サークル' },
+                  { id: 'particles', label: '✨ パーティクル' }
+                ].map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => setVisualStyle(s.id)}
+                    className={`px-3 py-1.5 rounded-lg text-sm transition-all ${
+                      visualStyle === s.id
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Color Scheme */}
+            <div className="bg-gray-800 rounded-xl p-4 mb-4">
+              <p className="text-xs text-gray-400 mb-2">カラー</p>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { id: 'gradient', label: '🌈' },
+                  { id: 'fire', label: '🔥' },
+                  { id: 'ocean', label: '🌊' },
+                  { id: 'neon', label: '💜' },
+                  { id: 'mono', label: '⚪' }
+                ].map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => setColorScheme(c.id)}
+                    className={`px-3 py-1.5 rounded-lg text-lg transition-all ${
+                      colorScheme === c.id
+                        ? 'bg-purple-600 ring-2 ring-purple-400'
+                        : 'bg-gray-700 hover:bg-gray-600'
+                    }`}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sensitivity */}
+            <div className="bg-gray-800 rounded-xl p-4 mb-4">
+              <p className="text-xs text-gray-400 mb-2">感度: {sensitivity.toFixed(1)}x</p>
+              <input
+                type="range"
+                min="0.5"
+                max="3"
+                step="0.1"
+                value={sensitivity}
+                onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+              />
+            </div>
+
+            {/* Background Settings */}
+            {bgPreviewUrl && (
+              <div className="bg-gray-800 rounded-xl p-4">
+                <p className="text-xs text-gray-400 mb-3">🖼️ 背景画像設定</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">透明度: {Math.round(bgOpacity * 100)}%</p>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={bgOpacity}
+                      onChange={(e) => setBgOpacity(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">ぼかし: {bgBlur}px</p>
+                    <input
+                      type="range"
+                      min="0"
+                      max="20"
+                      step="1"
+                      value={bgBlur}
+                      onChange={(e) => setBgBlur(parseInt(e.target.value))}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Footer */}
+            <p className="text-center text-gray-600 text-xs mt-6">
+              Audio Spectrum Visualizer - Web Audio API
+            </p>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<AudioSpectrum />);
+  </script>
+</body>
+</html>
